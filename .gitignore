@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+DEPLOYMENT_GUIDE.md
+config.json
+ARCHITECTURE.md
+.claude/
+log/*
+profile/*
+relationship/*
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 数据库
+*.db
+
+# 日志
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 敏感文件
+.env

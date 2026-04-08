@@ -10,9 +10,15 @@ DEPLOYMENT_GUIDE.md
 config.json
 ARCHITECTURE.md
 .claude/
+
 log/*
+!log/.gitkeep
+
 profile/*
+!profile/.gitkeep
+
 relationship/*
+!relationship/.gitkeep
 # 虚拟环境
 venv/
 .venv/

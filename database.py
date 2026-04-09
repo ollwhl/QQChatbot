@@ -121,18 +121,24 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    def add_msg(self, msg: MessageModel):
-        """Inserts a message into the database."""
-        sql = """
-        INSERT INTO messages (msg_id, timestamp, group_id, user_id, sender_name, sender_card, context, is_ai, is_group, peer_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
+    def add_msg(self, msg: MessageModel, force=False):
+        """Inserts a message into the database. If force=True, overwrites existing record."""
+        if force:
+            sql = """
+            INSERT OR REPLACE INTO messages (msg_id, timestamp, group_id, user_id, sender_name, sender_card, context, is_ai, is_group, peer_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        else:
+            sql = """
+            INSERT OR IGNORE INTO messages (msg_id, timestamp, group_id, user_id, sender_name, sender_card, context, is_ai, is_group, peer_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute(sql, msg.to_tuple())
             conn.commit()
-        except sqlite3.IntegrityError as e:
+        except Exception as e:
             print(f"Error inserting message {msg.msg_id}: {e}")
         finally:
             if 'conn' in locals():
@@ -355,9 +361,10 @@ class NetDatabaseManager:
             "peer_id": msg.peer_id
         }
 
-    def add_msg(self, msg: MessageModel):
-        """Inserts a message into the database via API."""
+    def add_msg(self, msg: MessageModel, force=False):
+        """Inserts a message into the database via API. If force=True, overwrites existing record."""
         data = self._model_to_dict(msg)
+        data["force"] = force
         result = self._request("db/add_msg", data=data)
         if result and result.get("status") != "ok":
             print(f"[NetDatabaseManager] add_msg failed: {result.get('error')}")

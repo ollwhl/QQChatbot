@@ -6,6 +6,7 @@ from call_llm import MESSAGE_ANALYZE_MODEL
 from database import db, MessageModel
 import call_llm
 import AI_agent
+import qq_msg
 
 
 # ──────────────── 返回结构 ────────────────
@@ -158,6 +159,44 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_bot",
+            "description": "开启或关闭当前聊天对象（群或私聊）的机器人。用户可能说'开机器人'、'关机器人'、'开启机器人'、'关闭机器人'、'开'、'关'、'闭嘴'、'说话'等",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true 开启机器人，false 关闭机器人",
+                    }
+                },
+                "required": ["enabled"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bypass_master_detection",
+            "description": "临时关闭或恢复主人消息检测（测试用）。关闭后即使有主人消息，机器人也会正常回复。用户可能说'关闭主人检测'、'暂停master检测'、'测试模式'、'恢复主人检测'等",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true 关闭主人检测（进入测试模式），false 恢复主人检测",
+                    },
+                    "minutes": {
+                        "type": "integer",
+                        "description": "自动恢复时间（分钟），默认 30 分钟。仅在 enabled=true 时有效",
+                    }
+                },
+                "required": ["enabled"],
+            },
+        },
+    },
 ]
 
 
@@ -166,7 +205,7 @@ def _attack_someone(context,name:str,reason:str,**_kwargs) -> dict:
     group_id = context.get("group_id")
     user_id = context.get("user_id")
     is_group = context.get("is_group", False)
-    system_prompt = f"你是一个不爱说话的主人的“嘴替”，根据上下文使用你所能使用的最具有攻击性的语言攻击 [{name}] {f',是因为{reason}，主要攻击这一部分' if reason else ''},直接生成不要解释"
+    system_prompt = f"你是一个不爱说话的主人的“嘴替”，根据上下文使用你所能使用幽默并带点讽刺的语言攻击 [{name}] {f',是因为{reason}，主要攻击这一部分' if reason else ''},直接生成不要解释"
     try :
         if is_group and group_id:
             msg_models: List[MessageModel] = db.get_latest_messages_by_count(group_id, True, 50)
@@ -174,8 +213,12 @@ def _attack_someone(context,name:str,reason:str,**_kwargs) -> dict:
             msg_models: List[MessageModel] = db.get_latest_messages_by_count(user_id, False, 50)
         user_prompt = "\n".join([msg.to_str() for msg in msg_models])
         reply = call_llm.call_chat_complete(system_prompt,user_prompt,3000,1.5)
+        if is_group:
+            qq_msg.send_group_message(group_id, reply)
+        else:
+            qq_msg.send_private_message(user_id, reply)
         print(user_prompt)
-        return {"result":reply}
+        return {"result": f"已生成攻击文本并发送给{name}"}
     except Exception as e:
         return{"result":""}
 
@@ -193,10 +236,10 @@ def _tool_get_prompt(**_kwargs) -> dict:
     """获取当前自定义人格 prompt"""
     try:
         with open("./prompts/custom_prompt.txt", "r", encoding="utf-8") as f:
-            content = f.read()
-        if not content.strip():
+            prompt_content = f.read()
+        if not prompt_content.strip():
             return {"result": "当前自定义 prompt 为空。"}
-        return {"result": f"当前自定义 prompt 内容：\n{content}"}
+        return {"result": f"当前自定义人格 prompt 内容：{prompt_content}"}
     except FileNotFoundError:
         return {"result": "自定义 prompt 文件不存在，尚未设置。"}
     except Exception as e:
@@ -361,6 +404,37 @@ def _tool_set_reply_threshold(context: dict, threshold: int = None, reset: bool 
     return {"result": f"{target_label} 的回复阈值已设置为 {threshold}。"}
 
 
+def _tool_toggle_bot(context: dict, enabled: bool, **_kwargs) -> dict:
+    """开启/关闭当前聊天对象的机器人"""
+    group_id = context.get("group_id")
+    user_id = context.get("user_id")
+    is_group = context.get("is_group", False)
+    target_id = group_id if is_group else user_id
+    if not target_id:
+        return {"result": "无法确定当前聊天对象。"}
+
+    target_label = f"群 {target_id}" if is_group else f"用户 {target_id}"
+    status = "已开启" if enabled else "已关闭"
+    return {
+        "result": f"{target_label} 的机器人{status}。",
+        "state_changes": {"toggle_bot": {"target_id": target_id, "enabled": enabled}},
+    }
+
+
+def _tool_bypass_master_detection(enabled: bool, minutes: int = 30, **_kwargs) -> dict:
+    """临时关闭/恢复主人消息检测"""
+    if enabled:
+        return {
+            "result": f"主人消息检测已关闭（测试模式），将在 {minutes} 分钟后自动恢复。",
+            "state_changes": {"bypass_master_detection": {"enabled": True, "minutes": minutes}},
+        }
+    else:
+        return {
+            "result": "主人消息检测已恢复。",
+            "state_changes": {"bypass_master_detection": {"enabled": False}},
+        }
+
+
 TOOL_FUNCTIONS = {
     "set_prompt": _tool_set_prompt,
     "get_prompt": _tool_get_prompt,
@@ -370,7 +444,12 @@ TOOL_FUNCTIONS = {
     "set_custom_mode": _tool_set_custom_mode,
     "attack_someone":_attack_someone,
     "set_reply_threshold":_tool_set_reply_threshold,
+    "toggle_bot":_tool_toggle_bot,
+    "bypass_master_detection":_tool_bypass_master_detection,
 }
+
+# 获取类工具：结果直接返回给用户，不经过 LLM 二次处理
+DIRECT_RETURN_TOOLS = {"get_prompt", "get_summary", "search"}
 
 
 # ──────────────── System Prompt ────────────────
@@ -390,6 +469,8 @@ SYSTEM_PROMPT = """你是一个QQ聊天机器人的管理助手。用户通过�
 - 联网搜索信息
 - 使用语言攻击工具
 - 设置/查询/重置当前聊天的回复阈值（活跃度）
+- 开启/关闭当前聊天对象的机器人
+- 临时关闭/恢复主人消息检测（测试模式）
 """
 
 
@@ -424,7 +505,6 @@ class CmdAgent:
         ]
 
         all_state_changes = {}
-        search_agent_results = []  # 记录搜索 agent 整合后的结果
         attack_result = ""
         for turn in range(self.MAX_TURNS):
             try:
@@ -458,10 +538,11 @@ class CmdAgent:
                 messages.append({
                     "role": "assistant",
                     "content": message.content or "",
-                    "tool_calls": tool_calls_data,
+                    "tool_calls": tool_calls_data, # type: ignore
                 })
 
                 # 执行每个工具
+                direct_results = []
                 for tc in message.tool_calls:
                     tool_result = self._call_tool(tc.function.name, tc.function.arguments, context)
 
@@ -471,9 +552,10 @@ class CmdAgent:
 
                     result_text = tool_result.get("result", "")
 
-                    # 记录搜索 agent 整合后的结果（Gemini/searchbot 已处理过，非网页原文）
-                    if tc.function.name == "search" and result_text:
-                        search_agent_results.append(result_text)
+                    # 获取类工具直接返回，不再经过 LLM
+                    if tc.function.name in DIRECT_RETURN_TOOLS and result_text:
+                        direct_results.append(result_text)
+
                     if tc.function.name == "attack_someone" and result_text:
                         attack_result = result_text
                     messages.append({
@@ -481,6 +563,13 @@ class CmdAgent:
                         "tool_call_id": tc.id,
                         "content": result_text,
                     })
+
+                # 如果有直接返回的结果，立即返回不再走 LLM
+                if direct_results:
+                    return CmdResult(
+                        message="\n\n".join(direct_results),
+                        state_changes=all_state_changes,
+                    )
 
                 continue
 
@@ -493,29 +582,16 @@ class CmdAgent:
                     state_changes=all_state_changes,
                 )
 
-            # 如果有搜索结果，拼接：搜索结果 + agent 解释
-            if search_agent_results:
-                combined = "\n\n".join(search_agent_results)
-                if agent_reply:
-                    combined += f"\n\n{agent_reply}"
-                return CmdResult(
-                    message=combined,
-                    state_changes=all_state_changes,
-                )
-
             return CmdResult(
                 message=agent_reply,
                 state_changes=all_state_changes,
             )
 
         # 超过最大轮次
-        final_msg = "命令处理超时，请简化指令后重试。"
-        if search_agent_results:
-            final_msg = "\n\n".join(search_agent_results)
         return CmdResult(
-            message=final_msg,
+            message="命令处理超时，请简化指令后重试。",
             state_changes=all_state_changes,
-        )
+            )
 
     def _call_tool(self, name: str, arguments: str, context: dict) -> dict:
         """执行指定工具，返回结果 dict"""

@@ -13,6 +13,35 @@ from config import CONFIG
 
 _server_cfg = CONFIG["chatbot_server"]
 base_url = _server_cfg["NAPCAT_HOST"]
+
+def _scrape_url_summary(url: str) -> str:
+    """调用 searchbot agent 爬取 URL 并总结内容（深度1）"""
+    import sys
+    import os
+    import threading
+
+    searchbot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'searchbot')
+
+    # 暂存与 searchbot 冲突的模块
+    stashed = {}
+    for name in list(sys.modules):
+        if name in ('config', 'agent') or name.startswith('tools'):
+            stashed[name] = sys.modules.pop(name)
+
+    sys.path.insert(0, searchbot_dir)
+    try:
+        from agent import chat_sync
+        return chat_sync(url)
+    except Exception as e:
+        print(f'[parse_msg] scrape_url_summary 失败: {e}')
+        return ''
+    finally:
+        for name in list(sys.modules):
+            if name in ('config', 'agent') or name.startswith('tools'):
+                del sys.modules[name]
+        sys.modules.update(stashed)
+        sys.path.remove(searchbot_dir)
+
 token = _server_cfg["NAPCAT_TOKEN"]
 _master_user_id = CONFIG["master_user_id"]
 def send_ai_identify(msg_id):
@@ -62,7 +91,7 @@ def send_private_message(user_id,msg):
             is_group=False,
             peer_id=user_id
         )
-        db.add_msg(bot_msg)
+        db.add_msg(bot_msg, force=True)
         send_ai_identify(msg_id)
     return response.text
 
@@ -124,7 +153,7 @@ def send_group_message(group_id,msg):
             is_ai=True,
             is_group=True
         )
-        db.add_msg(bot_msg)
+        db.add_msg(bot_msg, force=True)
     return response.text
     
 def get_group_message(group_id,msg_length=20):
@@ -298,6 +327,38 @@ def parse_msg(msg, time_format="%Y%m%d%H%M%S", quick_mode=False) -> MessageModel
                         reply_msg_content = reply_msg.get('raw_message', '')
 
                         content_parts.append(f'[回复消息：{reply_msg_sender}: {reply_msg_content}]')
+                    elif msg_type == 'json':
+                        json_str = msg_data.get('data', '')
+                        try:
+                            json_obj = json.loads(json_str)
+                            app_name = json_obj.get('prompt', '').strip()
+                            meta = json_obj.get('meta', {})
+                            detail = {}
+                            for key in meta:
+                                if isinstance(meta[key], dict):
+                                    detail = meta[key]
+                                    break
+                            title = detail.get('title', '')
+                            desc = detail.get('desc', '')
+                            url = detail.get('qqdocurl', '') or detail.get('url', '')
+                            parts = [p for p in [app_name, title, desc] if p]
+                            summary = ' - '.join(parts)
+                            # 非快速模式下，爬取链接内容并总结，成功则不保留链接以节省token
+                            if url and not quick_mode:
+                                try:
+                                    link_summary = _scrape_url_summary(url)
+                                    if link_summary:
+                                        summary += f' 内容摘要：{link_summary}'
+                                    else:
+                                        summary += f' 链接：{url}'
+                                except Exception as e:
+                                    print(f'[parse_msg] 爬取链接失败: {e}')
+                                    summary += f' 链接：{url}'
+                            elif url:
+                                summary += f' 链接：{url}' 
+                            content_parts.append(f'[卡片消息：{summary}]' if summary else '[卡片消息]')
+                        except (json.JSONDecodeError, TypeError):
+                            content_parts.append('[卡片消息]')
                     else:
                         content_parts.append(f'[{msg_type}类型消息，无法解析，请无视]')
                 elif isinstance(msg_segment, str):

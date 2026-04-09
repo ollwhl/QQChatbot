@@ -26,6 +26,28 @@ memorys = {}
 _disabled_chats = set()
 _disabled_chats_mutex = threading.Lock()
 
+# 临时绕过主人消息检测（测试用）
+_bypass_master_detection = False
+_bypass_master_timer = None
+
+def set_bypass_master_detection(enabled, minutes=30):
+    global _bypass_master_detection, _bypass_master_timer
+    if _bypass_master_timer:
+        _bypass_master_timer.cancel()
+        _bypass_master_timer = None
+    _bypass_master_detection = enabled
+    if enabled and minutes > 0:
+        def _restore():
+            global _bypass_master_detection
+            _bypass_master_detection = False
+            print(f"[MasterDetection] 主人检测已自动恢复（{minutes}分钟到期）")
+        _bypass_master_timer = threading.Timer(minutes * 60, _restore)
+        _bypass_master_timer.daemon = True
+        _bypass_master_timer.start()
+        print(f"[MasterDetection] 主人检测已关闭，将在 {minutes} 分钟后自动恢复")
+    else:
+        print(f"[MasterDetection] 主人检测已{'关闭' if enabled else '恢复'}")
+
 # 记录每个聊天目标是否正在处理中
 _chat_processing = {}
 _chat_processing_mutex = threading.Lock()
@@ -173,7 +195,7 @@ def send_messages_with_delay(send_func, target_id, reply, logger):
         logger.info(f"Sent message {i+1}/{len(parts)}: {msg}")
 
         if i < len(parts) - 1:
-            delay = random.uniform(0.5, 2.0)
+            delay = random.uniform(1.0, 2.0)
             time.sleep(delay)
 
 def cleanup_old_memorys(max_age_hours=24):
@@ -224,28 +246,36 @@ def _process_event(event_data):
         # 处理 Agent 返回的状态变更
         if cmd_result.state_changes.get("use_custom_prompt") is not None:
             use_custom_prompt = cmd_result.state_changes["use_custom_prompt"]
+        bypass_master = cmd_result.state_changes.get("bypass_master_detection")
+        if bypass_master is not None:
+            set_bypass_master_detection(bypass_master["enabled"], bypass_master.get("minutes", 30))
+        toggle_info = cmd_result.state_changes.get("toggle_bot")
+        if toggle_info:
+            tid = toggle_info["target_id"]
+            with _disabled_chats_mutex:
+                if toggle_info["enabled"]:
+                    _disabled_chats.discard(tid)
+                else:
+                    _disabled_chats.add(tid)
+            logger.info(f"Bot {'enabled' if toggle_info['enabled'] else 'disabled'} for {tid} via cmd")
         return jsonify({
             'status': 'ok',
         })
-    # 按聊天对象开启/关闭
-    if event_data.get('raw_message') == CONFIG["chatbot_server"].get("trun_on_cmd"):
-        if event_data.get('message_type') == 'private':
-            chat_target = event_data.get('user_id')
-        else:
-            chat_target = event_data.get('group_id')
+    # trigger cmd: 按聊天对象调整回复阈值
+    _THRESHOLD_STEP = 2  # 每次调整的步长
+    raw_msg = event_data.get('raw_message')
+    if raw_msg in (CONFIG["chatbot_server"].get("trun_on_cmd"), CONFIG["chatbot_server"].get("trun_off_cmd")):
+        is_group = event_data.get('message_type') != 'private'
+        chat_target = event_data.get('group_id') if is_group else event_data.get('user_id')
         if chat_target:
-            with _disabled_chats_mutex:
-                _disabled_chats.discard(chat_target)
-            logger.info(f"Chatbot enabled for {chat_target}")
-    if event_data.get('raw_message') == CONFIG["chatbot_server"].get("trun_off_cmd"):
-        if event_data.get('message_type') == 'private':
-            chat_target = event_data.get('user_id')
-        else:
-            chat_target = event_data.get('group_id')
-        if chat_target:
-            with _disabled_chats_mutex:
-                _disabled_chats.add(chat_target)
-            logger.info(f"Chatbot disabled for {chat_target}")
+            current = AI_agent.get_reply_threshold(chat_target, is_group)
+            if raw_msg == CONFIG["chatbot_server"].get("trun_on_cmd"):
+                new_val = max(0, current - _THRESHOLD_STEP)
+            else:
+                new_val = min(10, current + _THRESHOLD_STEP)
+            AI_agent.set_reply_threshold(chat_target, is_group, new_val)
+            target_label = f"群{chat_target}" if is_group else f"用户{chat_target}"
+            logger.info(f"Reply threshold for {target_label}: {current} -> {new_val}")
 
     # ——————————————————PRIVATE MESSAGE————————————————————
     if event_data.get('message_type') == 'private':
@@ -290,11 +320,13 @@ def _process_event(event_data):
 
                     msg_models = db.get_latest_messages_by_time(target_user, False, 30)
                     has_master_message = False
-                    for msg in msg_models:
-                        if msg.is_master:
-                            print("Master message detected, AI will not reply.")
-                            has_master_message = True
-                            break
+                    if not _bypass_master_detection:
+                        for msg in msg_models:
+                            if msg.is_master:
+                                print("Master message detected, AI will not reply.")
+                                print(f"消息内容: {msg.to_str()}")
+                                has_master_message = True
+                                break
                     if len(msg_models) < 20 :
                         msg_models = db.get_latest_messages_by_count(target_user,False,20)
                     if not has_master_message:
@@ -353,16 +385,16 @@ def _process_event(event_data):
                 # 按时间排序
                 msg_models.sort(key=lambda x: int(x.timestamp) if x.timestamp.isdigit() else 0)
             
-            if len(msg_models) > 1:
-                print(msg_models[-2].to_str())
             
             # 检查是否有master消息
             has_master_message = False
-            for msg in msg_models:
-                if msg.is_master:
-                    print("Master message detected, AI will not reply.")
-                    has_master_message = True
-                    break
+            if not _bypass_master_detection:
+                for msg in msg_models:
+                    if msg.is_master:
+                        print("Master message detected, AI will not reply.")
+                        print(f"消息内容: {msg.to_str()}")
+                        has_master_message = True
+                        break
             
             if not has_master_message:
                 memory = memorys.get(target_group)

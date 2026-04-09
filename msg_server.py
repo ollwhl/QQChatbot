@@ -175,7 +175,8 @@ def db_add_msg():
             is_group=data["is_group"],
             peer_id=data.get("peer_id")
         )
-        db.add_msg(msg)
+        force = data.get("force", False)
+        db.add_msg(msg, force=force)
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500

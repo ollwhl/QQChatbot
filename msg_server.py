@@ -131,7 +131,22 @@ def handle_nc_event():
     is_target_group = (event_data.get('message_type') == 'group' and
                        event_data.get('group_id') in target_groups)
 
-    is_target = is_target_private or is_master_private or is_target_group
+    # @master(机器人) + /命令 放行（与 command.py 检测逻辑一致）
+    is_cmd = False
+    try:
+        segs = event_data.get("message", [])
+        if segs and isinstance(segs, list) and len(segs) > 1:
+            first = segs[0]
+            second = segs[1]
+            if (first.get('type') == 'at' and
+                str(first.get('data', {}).get('qq')) == str(_master_user_id) and
+                second.get('type') == 'text' and
+                second.get('data', {}).get('text', '').strip().startswith("/")):
+                is_cmd = True
+    except Exception:
+        pass
+
+    is_target = is_target_private or is_master_private or is_target_group or is_cmd
 
     if not is_target:
         # 非目标消息，不处理
@@ -355,6 +370,21 @@ def switch_msg_server():
 
     else:
         return jsonify({'status': 'error', 'message': '未知命令'}), 400
+
+@app.route('/reload_targets', methods=['POST'])
+def reload_targets():
+    """热重载监听目标列表（从 config.json 重新读取）"""
+    global target_groups, target_users
+    try:
+        from config import _load_config
+        new_config = _load_config()
+        target_groups = new_config["message_server"]["target_groups"]
+        target_users = new_config["message_server"]["target_users"]
+        print(f"[reload_targets] 已重载: groups={target_groups}, users={target_users}")
+        return jsonify({"status": "ok", "groups": target_groups, "users": target_users})
+    except Exception as e:
+        print(f"[reload_targets] 重载失败: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5002, debug=debug)

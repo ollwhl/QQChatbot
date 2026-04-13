@@ -8,6 +8,8 @@ build/
 *.egg
 DEPLOYMENT_GUIDE.md
 config.json
+chat_thresholds.json
+prompts\custom_prompt.txt
 ARCHITECTURE.md
 .claude/
 

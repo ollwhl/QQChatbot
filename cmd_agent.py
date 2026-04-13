@@ -577,7 +577,7 @@ TOOL_FUNCTIONS = {
 }
 
 # 获取类工具：结果直接返回给用户，不经过 LLM 二次处理
-DIRECT_RETURN_TOOLS = {"get_prompt", "get_summary", "search"}
+DIRECT_RETURN_TOOLS = {"get_prompt", "get_summary", "search","attack_someone"}
 
 
 # ──────────────── System Prompt ────────────────

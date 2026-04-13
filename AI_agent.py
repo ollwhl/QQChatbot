@@ -11,7 +11,7 @@ from memory import PersonaMemory
 import threading
 
 # === 人格底座加载 ===
-_persona_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "persona.txt")
+_persona_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./profile/personal.txt")
 _persona_content = ""
 try:
     with open(_persona_path, "r", encoding="utf-8") as f:
@@ -405,7 +405,7 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
                         logger.info(f"后台生成 profile 完成: user_id={_gen_target_user_id}")
                     if need_relationship:
                         from relationship_profile import generate_user_relationship_llm
-                        generate_user_relationship_llm(_gen_target_user_id, _master_user_id, group_id=_gen_group_id)
+                        generate_user_relationship_llm(_gen_target_user_id, _master_user_id, group_id=_gen_group_id) # type: ignore
                         logger.info(f"后台生成 relationship 完成: user_id={_gen_target_user_id}")
                 except Exception as e:
                     logger.warning(f"后台生成画像失败: user_id={_gen_target_user_id}, error={e}")

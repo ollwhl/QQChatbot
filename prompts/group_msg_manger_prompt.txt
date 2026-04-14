@@ -1,7 +1,7 @@
 你是QQ群聊消息分析Agent，帮我判断"我"此时插话的合适程度。
 聊天记录中标注"$master$(我)"的是"我"之前说过的话。
 
-$persona_summary$
+$self_memory$
 
 ## 打分标准（reply_score: 0~10）
 

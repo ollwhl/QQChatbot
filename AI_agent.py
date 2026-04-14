@@ -11,13 +11,21 @@ from memory import PersonaMemory
 import threading
 
 # === 人格底座加载 ===
-_persona_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./profile/persona.txt")
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+_persona_path = os.path.join(_base_dir, "./profile/persona/persona.md")
+_self_path = os.path.join(_base_dir, "./profile/persona/self.md")
 _persona_content = ""
+_self_content = ""
 try:
     with open(_persona_path, "r", encoding="utf-8") as f:
         _persona_content = f.read()
 except FileNotFoundError:
-    print(f"Warning: persona.txt not found at {_persona_path}")
+    print(f"Warning: persona.md not found at {_persona_path}")
+try:
+    with open(_self_path, "r", encoding="utf-8") as f:
+        _self_content = f.read()
+except FileNotFoundError:
+    print(f"Warning: self.md not found at {_self_path}")
 
 # === 回复阈值 ===
 _threshold_cfg = CONFIG.get("chatbot_server", {}).get("reply_threshold", {})
@@ -118,24 +126,13 @@ def load_prompt(filepath: str) -> str:
     content = content.replace('$master$', CONFIG['master_name'])
     content = content.replace('$persona$', _persona_content)
     # 分析 prompt 用简短的人格摘要（只取兴趣和性格部分）
-    content = content.replace('$persona_summary$', _build_persona_summary())
+    content = content.replace('$self_memory$', _build_persona_summary())
     return content
 
 
 def _build_persona_summary() -> str:
-    """从完整人格中提取摘要，供分析模型使用"""
-    if not _persona_content:
-        return ""
-    # 提取兴趣和性格相关行，给分析模型一个简短参考
-    lines = []
-    for line in _persona_content.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('-') and any(kw in stripped for kw in ['玩', '追', '兴趣', '爱好', '性格', '风格', '叫我']):
-            lines.append(stripped)
-    if lines:
-        return "【我的简要信息】\n" + "\n".join(lines[:8])
-    return ""
-
+    """返回 self.md 内容，供分析模型使用"""
+    return _self_content
 
 def msg_manger(logger, msg_models: List[MessageModel], memory: Optional[PersonaMemory] = None, is_group=True, max_msg=20, use_model=MESSAGE_ANALYZE_MODEL):
     """分析消息，返回 reply_score / topic_summary / reply_to"""

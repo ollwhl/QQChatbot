@@ -13,11 +13,13 @@ prompts/custom_prompt.txt
 ARCHITECTURE.md
 .claude/
 
+
 log/*
 !log/.gitkeep
 
 profile/*
 !profile/.gitkeep
+!profile/persona/.gitkeep
 
 relationship/*
 !relationship/.gitkeep

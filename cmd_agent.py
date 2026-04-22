@@ -1,11 +1,10 @@
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List
 from openai import OpenAI
 from call_llm import MESSAGE_ANALYZE_MODEL
 from database import db, MessageModel
 import call_llm
-import AI_agent
 import qq_msg
 
 
@@ -14,7 +13,6 @@ import qq_msg
 @dataclass
 class CmdResult:
     message: str = ""
-    state_changes: dict = field(default_factory=dict)
 
 
 # ──────────────── 工具定义 ────────────────
@@ -329,13 +327,13 @@ def _tool_get_chat_history(context: dict, minutes: int = None, count: int = None
         return {"result": f"获取聊天记录失败：{e}"}
 
 
-def _tool_set_custom_mode(enabled: bool, **_kwargs) -> dict:
+def _tool_set_custom_mode(context, enabled: bool, **_kwargs) -> dict:
     """开启/关闭自定义人格模式"""
+    session = context.get("session")
+    if session:
+        session.use_custom_prompt = enabled
     status = "已开启" if enabled else "已关闭"
-    return {
-        "result": f"自定义人格模式{status}。",
-        "state_changes": {"use_custom_prompt": enabled},
-    }
+    return {"result": f"自定义人格模式{status}。"}
 
 
 def _searchbot_fallback(query: str) -> str:
@@ -397,60 +395,51 @@ def _tool_search(query: str, **_kwargs) -> dict:
 
 def _tool_set_reply_threshold(context: dict, threshold: int = None, reset: bool = False, **_kwargs) -> dict:
     """设置/查询/重置当前聊天对象的回复阈值"""
-    group_id = context.get("group_id")
-    user_id = context.get("user_id")
-    is_group = context.get("is_group", False)
-    target_id = group_id if is_group else user_id
-    if not target_id:
+    session = context.get("session")
+    if not session:
         return {"result": "无法确定当前聊天对象。"}
 
-    target_label = f"群 {target_id}" if is_group else f"用户 {target_id}"
+    target_label = f"群 {session.chat_id}" if session.is_group else f"用户 {session.chat_id}"
 
     if reset:
-        AI_agent.remove_reply_threshold(target_id, is_group)
-        default = AI_agent.get_reply_threshold(target_id, is_group)
-        return {"result": f"{target_label} 的回复阈值已重置为默认值 {default}。"}
+        session.reset_reply_threshold()
+        from status import chat_manager
+        chat_manager.save_threshold(session)
+        return {"result": f"{target_label} 的回复阈值已重置为默认值 {session.reply_threshold}。"}
 
     if threshold is None:
-        current = AI_agent.get_reply_threshold(target_id, is_group)
-        return {"result": f"{target_label} 当前回复阈值为 {current}（0~10，越低越活跃）。"}
+        return {"result": f"{target_label} 当前回复阈值为 {session.reply_threshold}（0~10，越低越活跃）。"}
 
     if not (0 <= threshold <= 10):
         return {"result": "阈值范围为 0~10，请重新设置。"}
 
-    AI_agent.set_reply_threshold(target_id, is_group, threshold)
+    session.reply_threshold = threshold
+    from status import chat_manager
+    chat_manager.save_threshold(session)
     return {"result": f"{target_label} 的回复阈值已设置为 {threshold}。"}
 
 
 def _tool_toggle_bot(context: dict, enabled: bool, **_kwargs) -> dict:
     """开启/关闭当前聊天对象的机器人"""
-    group_id = context.get("group_id")
-    user_id = context.get("user_id")
-    is_group = context.get("is_group", False)
-    target_id = group_id if is_group else user_id
-    if not target_id:
+    session = context.get("session")
+    if not session:
         return {"result": "无法确定当前聊天对象。"}
 
-    target_label = f"群 {target_id}" if is_group else f"用户 {target_id}"
+    session.enabled = enabled
+    target_label = f"群 {session.chat_id}" if session.is_group else f"用户 {session.chat_id}"
     status = "已开启" if enabled else "已关闭"
-    return {
-        "result": f"{target_label} 的机器人{status}。",
-        "state_changes": {"toggle_bot": {"target_id": target_id, "enabled": enabled}},
-    }
+    return {"result": f"{target_label} 的机器人{status}。"}
 
 
-def _tool_bypass_master_detection(enabled: bool, minutes: int = 30, **_kwargs) -> dict:
+def _tool_bypass_master_detection(context: dict, enabled: bool, minutes: int = 30, **_kwargs) -> dict:
     """临时关闭/恢复主人消息检测"""
+    session = context.get("session")
+    if session:
+        session.set_bypass_master_detection(enabled, minutes)
     if enabled:
-        return {
-            "result": f"主人消息检测已关闭（测试模式），将在 {minutes} 分钟后自动恢复。",
-            "state_changes": {"bypass_master_detection": {"enabled": True, "minutes": minutes}},
-        }
+        return {"result": f"主人消息检测已关闭（测试模式），将在 {minutes} 分钟后自动恢复。"}
     else:
-        return {
-            "result": "主人消息检测已恢复。",
-            "state_changes": {"bypass_master_detection": {"enabled": False}},
-        }
+        return {"result": "主人消息检测已恢复。"}
 
 
 def _reload_msg_server_targets():
@@ -633,7 +622,6 @@ class CmdAgent:
             {"role": "user", "content": user_input},
         ]
 
-        all_state_changes = {}
         attack_result = ""
         for turn in range(self.MAX_TURNS):
             try:
@@ -674,11 +662,6 @@ class CmdAgent:
                 direct_results = []
                 for tc in message.tool_calls:
                     tool_result = self._call_tool(tc.function.name, tc.function.arguments, context)
-
-                    # 收集状态变更
-                    if "state_changes" in tool_result:
-                        all_state_changes.update(tool_result["state_changes"])
-
                     result_text = tool_result.get("result", "")
 
                     # 获取类工具直接返回，不再经过 LLM
@@ -697,7 +680,6 @@ class CmdAgent:
                 if direct_results:
                     return CmdResult(
                         message="\n\n".join(direct_results),
-                        state_changes=all_state_changes,
                     )
 
                 continue
@@ -706,21 +688,12 @@ class CmdAgent:
             agent_reply = message.content or ""
 
             if attack_result != "":
-                return CmdResult(
-                    message=attack_result,
-                    state_changes=all_state_changes,
-                )
+                return CmdResult(message=attack_result)
 
-            return CmdResult(
-                message=agent_reply,
-                state_changes=all_state_changes,
-            )
+            return CmdResult(message=agent_reply)
 
         # 超过最大轮次
-        return CmdResult(
-            message="命令处理超时，请简化指令后重试。",
-            state_changes=all_state_changes,
-            )
+        return CmdResult(message="命令处理超时，请简化指令后重试。")
 
     def _call_tool(self, name: str, arguments: str, context: dict) -> dict:
         """执行指定工具，返回结果 dict"""

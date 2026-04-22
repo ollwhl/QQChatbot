@@ -5,7 +5,7 @@ import qq_msg
 _agent = CmdAgent()
 
 
-def handle_cmd(event_data: dict):
+def handle_cmd(event_data: dict, session=None):
     """
     检测消息是否为命令（以 / 开头），如果是则交给 CmdAgent 处理。
 
@@ -32,6 +32,7 @@ def handle_cmd(event_data: dict):
                     context = {
                         "user_id": event_data.get('user_id'),
                         "is_group": False,
+                        "session": session,
                     }
 
     elif message_type == 'group':
@@ -47,6 +48,7 @@ def handle_cmd(event_data: dict):
                         context = {
                             "group_id": event_data.get('group_id'),
                             "is_group": True,
+                            "session": session,
                         }
 
     if cmd_text is None:

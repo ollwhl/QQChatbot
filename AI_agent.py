@@ -7,7 +7,6 @@ import re
 from config import CONFIG
 from logger import group_chat_logger, private_chat_logger, log_ai_interaction
 from database import MessageModel
-from memory import PersonaMemory
 import threading
 
 # === 人格底座加载 ===
@@ -26,64 +25,6 @@ try:
         _self_content = f.read()
 except FileNotFoundError:
     print(f"Warning: self.md not found at {_self_path}")
-
-# === 回复阈值 ===
-_threshold_cfg = CONFIG.get("chatbot_server", {}).get("reply_threshold", {})
-_group_reply_threshold = _threshold_cfg.get("default_group", 5)
-_private_reply_threshold = _threshold_cfg.get("default_private", 3)
-# 从 config 中提取按对象设置的阈值（排除 default_group / default_private）
-_config_thresholds = {str(k): v for k, v in _threshold_cfg.items() if k not in ("default_group", "default_private")}
-
-# 运行时动态修改的阈值，持久化到 chat_thresholds.json
-_THRESHOLDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_thresholds.json")
-
-def _load_thresholds() -> dict:
-    try:
-        if os.path.exists(_THRESHOLDS_FILE):
-            with open(_THRESHOLDS_FILE, "r", encoding="utf-8") as f:
-                return {str(k): v for k, v in json.load(f).items()}
-    except Exception:
-        pass
-    return {}
-
-def _save_thresholds(data: dict):
-    with open(_THRESHOLDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-_runtime_thresholds = _load_thresholds()
-
-def _make_threshold_key(target_id, is_group: bool) -> str:
-    """生成带前缀的阈值 key，如 group_123456 或 private_789012"""
-    prefix = "group" if is_group else "private"
-    return f"{prefix}_{target_id}"
-
-def set_reply_threshold(target_id, is_group: bool, threshold: int):
-    """设置指定聊天对象的回复阈值（运行时，优先级最高）"""
-    key = _make_threshold_key(target_id, is_group)
-    _runtime_thresholds[key] = threshold
-    _save_thresholds(_runtime_thresholds)
-
-def get_reply_threshold(target_id, is_group: bool) -> int:
-    """获取阈值，优先级：运行时设置 > config按对象设置 > config默认值"""
-    key = _make_threshold_key(target_id, is_group)
-    # 优先：运行时通过命令设置的
-    runtime = _runtime_thresholds.get(key)
-    if runtime is not None:
-        return runtime
-    # 其次：config.json 中按对象设置的
-    config_val = _config_thresholds.get(key)
-    if config_val is not None:
-        return config_val
-    # 最后：全局默认值
-    return _group_reply_threshold if is_group else _private_reply_threshold
-
-def remove_reply_threshold(target_id, is_group: bool):
-    """移除运行时自定义阈值，恢复使用 config 中的设置"""
-    key = _make_threshold_key(target_id, is_group)
-    if key in _runtime_thresholds:
-        del _runtime_thresholds[key]
-        _save_thresholds(_runtime_thresholds)
-
 
 def extract_json(text: str) -> str:
     """从可能包含 markdown 代码块的文本中提取 JSON"""
@@ -134,8 +75,8 @@ def _build_persona_summary() -> str:
     """返回 self.md 内容，供分析模型使用"""
     return _self_content
 
-def msg_manger(logger, msg_models: List[MessageModel], memory: Optional[PersonaMemory] = None, is_group=True, max_msg=20, use_model=MESSAGE_ANALYZE_MODEL):
-    """分析消息，返回 reply_score / topic_summary / reply_to"""
+def msg_manger(logger, msg_models: List[MessageModel], memory=None, is_group=True, max_msg=20, use_model=MESSAGE_ANALYZE_MODEL):
+    """分析消息，返回 reply_score / topic_summary"""
     required_keys = [
         'reply_score',
         'topic_summary',
@@ -155,7 +96,7 @@ def msg_manger(logger, msg_models: List[MessageModel], memory: Optional[PersonaM
         # 如果有记忆，添加到系统提示中
         if memory and not memory.is_blank:
             memory_context = f"\n【记忆信息】\n{memory.to_str()}"
-            system_prompt += memory_context
+            user_prompt += memory_context
     except FileNotFoundError as e:
         log_ai_interaction(logger, "msg_manger", system_prompt, user_prompt, "Prompt file not found", "FAILURE", e)
         return None
@@ -171,8 +112,6 @@ def msg_manger(logger, msg_models: List[MessageModel], memory: Optional[PersonaM
 
         # 确保 reply_score 是数字
         dict_reply['reply_score'] = int(dict_reply.get('reply_score', 0))
-        dict_reply.setdefault('reply_to', '')
-
         log_ai_interaction(logger, "msg_manger", system_prompt, user_prompt, reply, "SUCCESS")
         return dict_reply
     except Exception as e:
@@ -180,7 +119,7 @@ def msg_manger(logger, msg_models: List[MessageModel], memory: Optional[PersonaM
         return None
 
 
-def generate_chat_response(logger, context_info: str, msg_models: List[MessageModel], memory: Optional[PersonaMemory], max_msg, reply_to: str = "", is_group: bool = True, use_model=CHAT_MODEL, use_custom_prompt=False):
+def generate_chat_response(logger, context_info: str, msg_models: List[MessageModel], memory, max_msg, is_group: bool = True, use_model=CHAT_MODEL, use_custom_prompt=False):
     """根据分析结果生成聊天回复"""
     system_prompt = ""
     user_prompt = ""
@@ -201,7 +140,6 @@ def generate_chat_response(logger, context_info: str, msg_models: List[MessageMo
             user_prompt = build_group_user_prompt(
                 messages=[msg_model.to_str() for msg_model in msg_models],
                 context_info=context_info,
-                reply_to=reply_to,
                 memory=memory,
                 max_messages=max_msg
             )
@@ -209,7 +147,6 @@ def generate_chat_response(logger, context_info: str, msg_models: List[MessageMo
             user_prompt = build_private_user_prompt(
                 messages=[msg_model.to_str() for msg_model in msg_models],
                 context_info=context_info,
-                reply_to=reply_to,
                 memory=memory,
                 max_messages=max_msg
             )
@@ -217,7 +154,7 @@ def generate_chat_response(logger, context_info: str, msg_models: List[MessageMo
         if user_prompt is None:
             raise ValueError("Failed to build user prompt")
 
-        reply = call_chat_complete(system_prompt, user_prompt, 1000, 1.2, 60, use_model)
+        reply = call_chat_complete(system_prompt, user_prompt, 1000, 0.6, 60, use_model)
         log_ai_interaction(logger, "generate_chat_response", system_prompt, user_prompt, reply, "SUCCESS")
         return reply
     except Exception as e:
@@ -229,8 +166,7 @@ def build_private_user_prompt(
     messages: List[str],
     current_time: Optional[str] = None,
     context_info: Optional[str] = None,
-    reply_to: Optional[str] = None,
-    memory: Optional[PersonaMemory] = None,
+    memory=None,
     max_messages: int = 20
 ) -> str:
     if current_time is None:
@@ -244,9 +180,6 @@ def build_private_user_prompt(
 
     if context_info:
         prompt_parts.append(f"\n【背景信息】\n{context_info}")
-
-    if reply_to:
-        prompt_parts.append(f"\n【回复目标】\n{reply_to}")
 
     prompt_parts.append("\n【最近的对话消息】")
     recent_messages = messages[-max_messages:] if len(messages) > max_messages else messages
@@ -264,8 +197,7 @@ def build_group_user_prompt(
     messages: List[str],
     current_time: Optional[str] = None,
     context_info: Optional[str] = None,
-    reply_to: Optional[str] = None,
-    memory: Optional[PersonaMemory] = None,
+    memory=None,
     max_messages: int = 20
 ) -> str:
     """构建群聊 user prompt"""
@@ -281,9 +213,6 @@ def build_group_user_prompt(
     if context_info:
         prompt_parts.append(f"\n【背景信息】\n{context_info}")
 
-    if reply_to:
-        prompt_parts.append(f"\n【回复目标】\n{reply_to}")
-
     prompt_parts.append("\n【最近的群聊消息】")
     recent_messages = messages[-max_messages:] if len(messages) > max_messages else messages
     if not recent_messages:
@@ -295,7 +224,7 @@ def build_group_user_prompt(
     return "\n".join(prompt_parts)
 
 
-def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[PersonaMemory], is_group: bool = True, use_custom_prompt: bool = False, target_id=None):
+def call_AI_agent(logger, msg_models: List[MessageModel], session, target_id=None):
     """
     调用 AI 代理处理消息并生成回复
 
@@ -308,6 +237,10 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
         logger.warning("No messages to process")
         return ""
 
+    memory = session.memory
+    is_group = session.is_group
+    use_custom_prompt = session.use_custom_prompt
+
     max_msg = min(20, len(msg_models))
 
     # 第一步：分析消息，得到 reply_score
@@ -318,11 +251,12 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
         return ""
 
     reply_score = analysis.get("reply_score", 0)
-    reply_threshold = get_reply_threshold(target_id, is_group) if target_id else (_group_reply_threshold if is_group else _private_reply_threshold)
+    reply_threshold = session.reply_threshold
     logger.info(f"reply_score={reply_score}, threshold={reply_threshold} ({'group' if is_group else 'private'})")
 
     # 被动记忆：如果 msg_manger 返回了新话题（非空且非null），立即记录到记忆
-    summary = analysis.get("topic_summary", "")
+    # summary = analysis.get("topic_summary", "")
+    summary = ""  # 暂时不记录话题了，避免误伤
     if memory and summary and isinstance(summary, str):
         try:
             memory.remember_topic(summary)
@@ -336,47 +270,23 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
         return ""
 
     # 第二步：构建上下文信息，传给生成模型
-    reply_to = analysis.get("reply_to", "")
-    reply_to_msg_index = analysis.get("reply_to_msg_index")
-
-    # # 验证 reply_to_msg_index：如果指向的消息之后已有bot回复，说明已处理过，应跳过
-    # if reply_to_msg_index is not None and isinstance(reply_to_msg_index, int):
-    #     recent_msgs = msg_models[-max_msg:]
-    #     if 0 <= reply_to_msg_index < len(recent_msgs):
-    #         # 检查该消息之后是否有bot的回复
-    #         for i in range(reply_to_msg_index + 1, len(recent_msgs)):
-    #             if recent_msgs[i].is_ai or recent_msgs[i].is_master:
-    #                 logger.warning(f"reply_to_msg_index={reply_to_msg_index} 指向的消息已被回复过，跳过本次请求")
-    #                 return ""
-
     context_info = f"话题：{summary}" if summary else ""
 
-    # 提取回复目标用户的信息
+    # 提取最新非bot消息的用户信息
     target_user_id = None
     target_user_name = None
 
-    if is_group:
-        # 群聊：根据 reply_to_msg_index 加载目标用户信息
-        if reply_to_msg_index is not None and isinstance(reply_to_msg_index, int):
-            recent_msgs = msg_models[-max_msg:]
-            if 0 <= reply_to_msg_index < len(recent_msgs):
-                target_msg = recent_msgs[reply_to_msg_index]
-                target_user_id = target_msg.user_id
-                target_user_name = target_msg.sender_card or target_msg.sender_name
-    else:
-        # 私聊：总是加载对方的信息
-        # 从消息中找到对方的 user_id（非 AI、非 master 的发送者）
-        for msg in reversed(msg_models):
-            if not msg.is_ai and not msg.is_master:
-                target_user_id = msg.user_id
-                target_user_name = msg.sender_name
-                break
+    for msg in reversed(msg_models):
+        if not msg.is_ai and not msg.is_master:
+            target_user_id = msg.user_id
+            target_user_name = msg.sender_card or msg.sender_name if is_group else msg.sender_name
+            break
 
-        # 如果还是找不到，尝试使用 peer_id
-        if target_user_id is None and msg_models:
-            last_msg = msg_models[-1]
-            if hasattr(last_msg, 'peer_id') and last_msg.peer_id:
-                target_user_id = last_msg.peer_id
+    # 私聊兜底：尝试使用 peer_id
+    if not is_group and target_user_id is None and msg_models:
+        last_msg = msg_models[-1]
+        if hasattr(last_msg, 'peer_id') and last_msg.peer_id:
+            target_user_id = last_msg.peer_id
 
     # 加载用户信息（profile 和 relationship），不存在则后台生成
     if target_user_id is not None:
@@ -455,7 +365,7 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
 
     reply = generate_chat_response(
         logger, context_info, msg_models, memory, max_msg,
-        reply_to=reply_to, is_group=is_group, use_custom_prompt=use_custom_prompt, use_model=CHAT_MODEL
+        is_group=is_group, use_custom_prompt=use_custom_prompt, use_model=CHAT_MODEL
     )
 
     if not reply:
@@ -492,7 +402,7 @@ def call_AI_agent(logger, msg_models: List[MessageModel], memory: Optional[Perso
         return messages
 
 
-def gen_simple_reply(msg_dists: List[str], memory: Optional[PersonaMemory] = None, is_group: bool = True):
+def gen_simple_reply(msg_dists: List[str], memory=None, is_group: bool = True):
     """生成简短回复，支持记忆"""
     logger = group_chat_logger if is_group else private_chat_logger
     required_keys = ['should_reply', 'reply', 'need_more_context']
